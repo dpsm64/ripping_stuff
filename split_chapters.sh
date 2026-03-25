@@ -5,15 +5,27 @@
 #   ./split_chapters.sh input.mp4
 #   ./split_chapters.sh input.mp4 "Show Name - S01E"
 #   ./split_chapters.sh input.mp4 "Show Name - S01E" /path/to/output/dir
-#   ./split_chapters.sh input.mp4 "Show Name - S01E" /path/to/output/dir 4
-#   ./split_chapters.sh input.mp4 "Show Name - S01E" /path/to/output/dir 4 4
+#   ./split_chapters.sh input.mp4 "Show Name - S01E" /path/to/output/dir <start_ep>
+#   ./split_chapters.sh input.mp4 "Show Name - S01E" /path/to/output/dir <start_ep> <chapters_per_ep>
+#   ./split_chapters.sh input.mp4 "Show Name - S01E" /path/to/output/dir <start_ep> <chapters_per_ep> <chapter_map>
 #
-# Output files will be named: <prefix><NN>.mp4  (e.g. "Show Name - S01E04.mp4")
-# If no prefix is given, the input filename (sans extension) is used.
-# If no output dir is given, files are written alongside the input file.
-# start_episode   (4th arg): episode number for the first output file (default: 1).
-# chapters_per_ep (5th arg): how many chapters to merge into one episode (default: 1).
-#                            Use 4 for a 1-hour show split into four acts per episode.
+# Arguments:
+#   output_prefix   (2nd): prefix for output filenames (default: input basename)
+#   output_dir      (3rd): directory for output files (default: same dir as input)
+#   start_episode   (4th): episode number for the first output file (default: 1)
+#   chapters_per_ep (5th): chapters to merge per episode when all episodes are uniform (default: 1)
+#   chapter_map     (6th): comma-separated list of chapters per episode, overrides chapters_per_ep
+#                          e.g. "4,4,5,4" for a disc where episode 3 has an extra act
+#
+# Examples:
+#   # Simple 1-chapter-per-episode (default)
+#   ./split_chapters.sh "Show S01 Disc1.mp4" "Show - S01E"
+#
+#   # Uniform 4 chapters per episode, disc 2 starting at E05
+#   ./split_chapters.sh "Show S01 Disc2.mp4" "Show - S01E" ~/Media/Show/S01/ 5 4
+#
+#   # Non-uniform disc: episodes have 4,4,5,4 chapters respectively
+#   ./split_chapters.sh "Show S01 Disc3.mp4" "Show - S01E" ~/Media/Show/S01/ 9 1 "4,4,5,4"
 #
 # Requirements: ffprobe + ffmpeg in PATH, python3
 
@@ -21,7 +33,7 @@ set -euo pipefail
 
 # ── Args ──────────────────────────────────────────────────────────────────────
 if [[ $# -lt 1 ]]; then
-    echo "Usage: $0 <input.mp4> [output_prefix] [output_dir]"
+    echo "Usage: $0 <input.mp4> [output_prefix] [output_dir] [start_ep] [chapters_per_ep] [chapter_map]"
     exit 1
 fi
 
@@ -33,6 +45,7 @@ PREFIX="${2:-$INPUT_BASE - E}"
 OUTDIR="${3:-$INPUT_DIR}"
 START_EP="${4:-1}"
 CHAPTERS_PER_EP="${5:-1}"
+CHAPTER_MAP="${6:-}"
 
 if ! [[ "$START_EP" =~ ^[0-9]+$ ]]; then
     echo "Error: start_episode must be a positive integer (got: '$START_EP')"
@@ -41,6 +54,11 @@ fi
 
 if ! [[ "$CHAPTERS_PER_EP" =~ ^[0-9]+$ ]] || [[ "$CHAPTERS_PER_EP" -lt 1 ]]; then
     echo "Error: chapters_per_ep must be a positive integer (got: '$CHAPTERS_PER_EP')"
+    exit 1
+fi
+
+if [[ -n "$CHAPTER_MAP" ]] && ! [[ "$CHAPTER_MAP" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+    echo "Error: chapter_map must be a comma-separated list of integers (got: '$CHAPTER_MAP')"
     exit 1
 fi
 
@@ -55,8 +73,9 @@ command -v ffmpeg  &>/dev/null || { echo "Error: ffmpeg not found in PATH";  exi
 
 mkdir -p "$OUTDIR"
 
-# ── Main: probe + split (all in one Python call) ──────────────────────────────
-INPUT="$INPUT" PREFIX="$PREFIX" OUTDIR="$OUTDIR" START_EP="$START_EP" CHAPTERS_PER_EP="$CHAPTERS_PER_EP" python3 << 'PYEOF'
+# ── Main: probe + split ───────────────────────────────────────────────────────
+INPUT="$INPUT" PREFIX="$PREFIX" OUTDIR="$OUTDIR" START_EP="$START_EP" \
+CHAPTERS_PER_EP="$CHAPTERS_PER_EP" CHAPTER_MAP="$CHAPTER_MAP" python3 << 'PYEOF'
 import json, os, subprocess, sys
 
 input_file      = os.environ['INPUT']
@@ -64,6 +83,7 @@ prefix          = os.environ['PREFIX']
 outdir          = os.environ['OUTDIR']
 start_ep        = int(os.environ['START_EP'])
 chapters_per_ep = int(os.environ['CHAPTERS_PER_EP'])
+chapter_map_str = os.environ['CHAPTER_MAP'].strip()
 
 # ── Probe for chapters ────────────────────────────────────────────────────────
 probe = subprocess.run(
@@ -83,42 +103,58 @@ if not chapters:
 
 print(f"Found {len(chapters)} chapter(s) in: {input_file}")
 
-if len(chapters) % chapters_per_ep != 0:
-    print(f"Warning: {len(chapters)} chapters doesn't divide evenly by {chapters_per_ep}.")
-    print(f"         The last episode will contain only {len(chapters) % chapters_per_ep} chapter(s).")
+# ── Build episode groups ──────────────────────────────────────────────────────
+if chapter_map_str:
+    # Explicit map: e.g. "4,4,5,4"
+    counts = [int(x) for x in chapter_map_str.split(',')]
+    total_mapped = sum(counts)
+    if total_mapped != len(chapters):
+        print(f"Error: chapter_map sums to {total_mapped} but file has {len(chapters)} chapters.")
+        print(f"       Check your map: {chapter_map_str}")
+        sys.exit(1)
+    groups = []
+    pos = 0
+    for n in counts:
+        groups.append(chapters[pos:pos+n])
+        pos += n
+    print(f"Using chapter_map [{chapter_map_str}] -> {len(groups)} episode(s), starting at episode {start_ep}\n")
+else:
+    # Uniform chunk size
+    if len(chapters) % chapters_per_ep != 0:
+        print(f"Warning: {len(chapters)} chapters doesn't divide evenly by {chapters_per_ep}.")
+        print(f"         The last episode will contain only {len(chapters) % chapters_per_ep} chapter(s).")
+        print(f"         Consider using a chapter_map instead.")
+    groups = [chapters[i:i+chapters_per_ep] for i in range(0, len(chapters), chapters_per_ep)]
+    print(f"Grouping into {len(groups)} episode(s) of {chapters_per_ep} chapter(s) each, starting at episode {start_ep}\n")
 
-# Group chapters into episodes
-groups = [chapters[i:i+chapters_per_ep] for i in range(0, len(chapters), chapters_per_ep)]
 ep_count = len(groups)
-print(f"Grouping into {ep_count} episode(s) of {chapters_per_ep} chapter(s) each, starting at episode {start_ep}\n")
 
 # ── Split ─────────────────────────────────────────────────────────────────────
 errors = []
 for i, group in enumerate(groups):
     ep_num = start_ep + i
-    start  = group[0]['start_time']   # start of first chapter in group
-    end    = group[-1]['end_time']    # end of last chapter in group
+    start  = group[0]['start_time']
+    end    = group[-1]['end_time']
     output = os.path.join(outdir, f"{prefix}{ep_num:02d}.mp4")
 
-    # Build a label from chapter titles if present
     titles = [ch.get('tags', {}).get('title', '') for ch in group]
     titles = [t for t in titles if t]
     if titles:
-        label = titles[0] if len(titles) == 1 else f"{titles[0]} … {titles[-1]}"
+        label = titles[0] if len(titles) == 1 else f"{titles[0]} ... {titles[-1]}"
     else:
         label = f"Episode {ep_num}"
 
     print(f"[{i+1}/{ep_count}] {label}")
-    print(f"         {float(start):.3f}s → {float(end):.3f}s  ({len(group)} chapter(s))")
-    print(f"         → {output}")
+    print(f"         {float(start):.3f}s -> {float(end):.3f}s  ({len(group)} chapter(s))")
+    print(f"         -> {output}")
 
     cmd = [
-        'ffmpeg', '-y',           # overwrite without asking
+        'ffmpeg', '-y',
         '-i',  input_file,
         '-ss', start,
         '-to', end,
-        '-c',  'copy',            # stream-copy: no re-encode, very fast
-        '-map_chapters', '-1',    # strip chapter metadata from the clip
+        '-c',  'copy',
+        '-map_chapters', '-1',
         output
     ]
 
