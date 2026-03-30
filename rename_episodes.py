@@ -4,15 +4,18 @@ rename_episodes.py - Copy media files from a source directory to an output
 directory, renaming them to a Jellyfin/Plex-compatible episode naming scheme.
 
 Usage:
-    python3 rename_episodes.py [--preview] <source_dir> <title> <season> <output_dir>
+    python3 rename_episodes.py [--preview] [--start-episode N] <source_dir> <title> <season> <output_dir>
 
 Options:
-    --preview   Print what would be copied (source, destination, file size)
-                without actually copying anything.
+    --preview           Print what would be copied (source, destination, file size)
+                        without actually copying anything.
+    --start-episode N   Episode number to start from (default: 1). Useful for
+                        multi-disc seasons where disc 2 might start at episode 5.
 
 Examples:
-    python3 rename_episodes.py --preview /mnt/rips/disc1 "The Wire" 2 /media/tv/The_Wire/Season_02
     python3 rename_episodes.py /mnt/rips/disc1 "The Wire" 2 /media/tv/The_Wire/Season_02
+    python3 rename_episodes.py --start-episode 5 /mnt/rips/disc2 "The Wire" 2 /media/tv/The_Wire/Season_02
+    python3 rename_episodes.py --preview --start-episode 5 /mnt/rips/disc2 "The Wire" 2 /media/tv/The_Wire/Season_02
 """
 
 import sys
@@ -36,9 +39,26 @@ def format_size(num_bytes):
 def main():
     args = sys.argv[1:]
 
+    # Extract --preview flag
     preview = "--preview" in args
     if preview:
         args = [a for a in args if a != "--preview"]
+
+    # Extract --start-episode N
+    start_episode = 1
+    if "--start-episode" in args:
+        idx = args.index("--start-episode")
+        if idx + 1 >= len(args):
+            print("Error: --start-episode requires a number argument")
+            sys.exit(1)
+        try:
+            start_episode = int(args[idx + 1])
+            if start_episode < 1:
+                raise ValueError
+        except ValueError:
+            print(f"Error: --start-episode must be a positive integer, got '{args[idx + 1]}'")
+            sys.exit(1)
+        args = args[:idx] + args[idx + 2:]
 
     if len(args) != 4:
         usage()
@@ -82,22 +102,23 @@ def main():
     season_str_padded = f"{season:02d}"
     prefix = "[PREVIEW] " if preview else ""
 
-    print(f"{prefix}Source : {source_dir}")
-    print(f"{prefix}Output : {output_dir}")
-    print(f"{prefix}Title  : {title}")
-    print(f"{prefix}Season : {season_str_padded}")
-    print(f"{prefix}Files  : {len(entries)}")
+    print(f"{prefix}Source        : {source_dir}")
+    print(f"{prefix}Output        : {output_dir}")
+    print(f"{prefix}Title         : {title}")
+    print(f"{prefix}Season        : {season_str_padded}")
+    print(f"{prefix}Start episode : {start_episode}")
+    print(f"{prefix}Files         : {len(entries)}")
     print()
 
     if preview:
         src_w = max(len(e) for e in entries)
         dst_w = max(
             len(f"{safe_title}_S{season_str_padded}E{ep:02d}{os.path.splitext(e)[1]}")
-            for ep, e in enumerate(entries, start=1)
+            for ep, e in enumerate(entries, start=start_episode)
         )
         print(f"  {'SOURCE FILE':<{src_w}}  {'DESTINATION FILE':<{dst_w}}  SIZE")
         print(f"  {'-' * src_w}  {'-' * dst_w}  ----")
-        for episode, filename in enumerate(entries, start=1):
+        for episode, filename in enumerate(entries, start=start_episode):
             ext = os.path.splitext(filename)[1]
             new_name = f"{safe_title}_S{season_str_padded}E{episode:02d}{ext}"
             src_path = os.path.join(source_dir, filename)
@@ -108,7 +129,7 @@ def main():
     else:
         os.makedirs(output_dir, exist_ok=True)
 
-        for episode, filename in enumerate(entries, start=1):
+        for episode, filename in enumerate(entries, start=start_episode):
             ext = os.path.splitext(filename)[1]
             new_name = f"{safe_title}_S{season_str_padded}E{episode:02d}{ext}"
             src_path = os.path.join(source_dir, filename)
